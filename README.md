@@ -1,4 +1,4 @@
-## git-review
+# git-review
 
 Place git-review somewhere in your path, and use it like any other built-in git command:
 
@@ -9,7 +9,7 @@ Place git-review somewhere in your path, and use it like any other built-in git 
     git review push
     git review mark 0 HEAD -m "please review"
 
-# Adding Review Notes
+## Adding Review Notes
 
 Code review notes managed by git-review consist of remarks (text) and a flag. Each time
 you annotate a commit, a flag value is required. Review flags mean roughly the below:
@@ -40,7 +40,7 @@ And when it's a go:
     git review mark +25 HEAD -m "This looks great!"
 
 
-# Listing Review Requests
+## Listing Review Requests
 
 You can use git-review's ```list``` command to list commits with review data. By default, the ```list``` command
 will display commit logs and review notes for commits with *pending* (flag = 0) review requests.
@@ -55,7 +55,7 @@ And for a compact listing, including just the commit hash and latest review flag
 
     git review list --all --compact
 
-# Collaborating Using Notes
+## Collaborating Using Notes
 
 The ```push``` and ```pull``` commands allow git-review to consume and publish notes from and to remote repositories (like Github).
 
