@@ -1,22 +1,48 @@
 #!/usr/bin/env python
 
-import sys, subprocess, argparse
+import sys, subprocess, argparse, select, time, os, tempfile
 
-REVIEW_FLAG_REF = "review-flag"
+REVIEW_NOTES_REF = "review/remarks"
 
 class CommandFailedError(Exception):
+    returncode = -1
+
+class NotImplementedError(Exception):
     pass
 
 def list_review_flags():
     revflags = None
     try:
         revflags = subprocess.check_output(["git", "notes", 
-            "--ref=refs/notes/%s" % (REVIEW_FLAG_REF,), "list"])
+            "--ref=refs/notes/%s" % (REVIEW_NOTES_REF,), "list"])
     except subprocess.CalledProcessError as e:
         raise CommandFailedError("could not get list of review flags: %s" % (e.strerror,))
     if revflags:
         pass
-    return [l.strip().split() for l in revflags.split("\n") if l]
+    found = [l.strip().split() for l in revflags.split("\n") if l]
+    commits = []
+    for f in found:
+        sha, fnm = f
+        notes = cat_file(sha)
+        if notes:
+            notes = parse_notes(notes)
+        else:
+            notes = []
+        for n in notes:
+            h = n[1]
+            flag = note_flag_extract(h)
+        commits.append((fnm, flag, notes))
+    return commits
+
+def get_author_info():
+    author = None
+    try:
+        name = subprocess.check_output(["git", "config", "user.name"]).strip()
+        email = subprocess.check_output(["git", "config", "user.email"]).strip()
+    except:
+        raise CommandFailedError("could not get author info")
+    author = (name, email)
+    return author
 
 def show_object(sha):
     out = None
@@ -26,13 +52,311 @@ def show_object(sha):
         raise CommandFailedError("could not fetch object %s: %s" % (sha, e.strerror))
     return out
 
+def ls_tree(sha):
+    out = None
+    try:
+        out = subprocess.check_output(["git", "ls-tree", sha])
+    except subprocess.CalledProcessError as e:
+        raise CommandFailedError("could not fetch tree %s: %s" % (sha, e.strerror))
+    out = [l.strip() for l in  out.strip().split("\n")]
+    return out
+
+def diff_tree(asha, bsha):
+    out = None
+    try:
+        out = subprocess.check_output(["git", "diff-tree", "-r", asha, bsha])
+    except subprocess.CalledProcessError as e:
+        raise CommandFailedError("could not get diff-tree")
+    out = out.strip()
+    diff = []
+    for l in out.strip().split("\n"):
+        l = l.strip().split()
+        if l:
+            diff.append(l) 
+    return diff
+
+def diff_index(sha):
+    out = None
+    try:
+        out = subprocess.check_output(["git", "diff-index", "-r", sha])
+    except subprocess.CalledProcessError as e:
+        raise CommandFailedError("could not get diff-index")
+    out = out.strip()
+    diff = []
+    for l in out.split("\n"):
+        diff.append(l.strip().split())
+    return diff
+
+def hash_object(obj, path, write=False):
+    out = None
+    cmd = ["git", "hash-object", "--path=%s" % path]
+    infiled, infile_path = tempfile.mkstemp('.git-review-merge')
+    os.write(infiled, obj)
+    os.close(infiled)
+    if write:
+        cmd.append("-w")
+    cmd.append(infile_path)
+    try:
+        out = subprocess.check_output(cmd)
+    except subprocess.CalledProcessError as e:
+        raise CommandFailedError("could not hash object")
+    finally:
+        os.unlink(infile_path)
+    sha = out.strip()
+    return sha
+
+def update_index(dat):
+    out = None
+    for l in dat:
+        mode, t, ref, fnm = l.split()
+        cmd = ["git", "update-index", "--add",
+                "--cacheinfo", mode, ref, fnm]
+        try:
+            out = subprocess.check_output(cmd)
+        except subprocess.CalledProcessError as e:
+            sys.stderr.write("couldn't update index with: %s\n" % (l,))
+    return out
+
+def write_tree():
+    out = None
+    try:
+        out = subprocess.check_output(["git", "write-tree"])
+    except subprocess.CalledProcessError as e:
+        raise CommandFailedError("could not write tree")
+    return out.strip().strip("\x00")
+
+def commit_tree(t, parent=None, msg="review notes union-merge"):
+    out = None
+    cmd = ["git", "commit-tree", t, "-m", msg]
+    if parent:
+        cmd += ("-p", parent)
+    try:
+        out = subprocess.check_output(cmd)
+    except subprocess.CalledProcessError as e:
+        raise CommandFailedError("could not commit tree")
+    return out.strip().strip("\x00")
+
+def update_ref(ref, new_val):
+    out = None
+    cmd = ["git", "update-ref", ref, new_val]
+    try:
+        out = subprocess.check_output(cmd)
+    except subprocess.CalledProcessError as e:
+        raise CommandFailedError("could not update ref")
+    return out.strip().strip("\x00")
+
+def cat_file(sha):
+    out = None
+    try:
+        out = subprocess.check_output(["git", "cat-file", "-p", sha])
+    except subprocess.CalledProcessError as e:
+        raise CommandFailedError("could not fetch tree %s: %s" % (sha, e.strerror))
+    return out
+
+def parse_notes(notes):
+    p = []
+    st = 'scan'
+    buf = ""
+    t = None
+    h = None
+    marker = None
+    for line in notes.split("\n"):
+        if line.startswith("<<<"):
+            marker = line[3:20]
+            t = float(line[3:20])
+            h = line[21:].strip()
+            st = "capture"
+        elif marker and st == 'capture' and line.startswith(marker):
+            p.append((t, h, buf))
+            buf = ""
+            st = 'scan'
+        elif st == 'capture':
+            buf += line
+        else:
+            pass
+    return p
+
+def note_flag_extract(note_header):
+    f, d, r = note_header.partition(' ')
+    f = int(f.strip('()'))
+    return f
+
+def stringify_notes(notes):
+    s = ""
+    for n in notes:
+        t, h, m = n
+        s += "<<<%016.6f:%s\n%s\n%016.6f\n\n" % (t, h, m.rstrip(), t)
+    return s
+
+def combine_notes(a, b):
+    if not a:
+        return b
+    elif not b:
+        return a
+    an = parse_notes(a)
+    bn = parse_notes(b)
+    def notes_cmp(a, b):
+        atime, hdr, msg = a
+        btime, hdr, msg = b
+        return cmp(atime, btime)
+    c = sorted(set(an+bn), notes_cmp)
+    return stringify_notes(c)
+
 def impl_list(args):
-    print [(f[1], int(show_object(f[0]).strip())) for f in list_review_flags()]
+    flags = [f for f in list_review_flags()
+        if len(f) >= 2]
+    def keep(f):
+        h, f, n = f
+        if args.all:
+            return True
+        elif f == 0 and args.pending:
+            return True
+        elif not f == 0 and args.complete:
+            return True
+        elif f > 0 and args.ok:
+            return True
+        elif f < 0 and args.rework:
+            return True
+        else:
+            return False
+    if args.mine_only:
+        raise NotImplementedError("filtering by author not implemented")
+    flags = filter(keep, flags)
+    if flags:
+        if args.compact:
+            print "\n".join(["%s %d" % (h, f) for h, f, n in flags])
+        else:
+            cmd = ["git", "show", "--notes=refs/notes/review/*"]
+            for h, f, n in flags:
+                cmd.append(h)
+            try:
+                print subprocess.check_output(cmd)
+            except subprocess.CalledProcessError as e:
+                raise CommandFailedError("could not show log w/ notes")
     return True
 
-def impl_show(args):
-    print "show obj goes here"
+def impl_mark(args):
+    fval = args.flag[0]
+    author_name, author_email = get_author_info()
+    time_stamp = time.time()
+    local_time = time.strftime("%Y.%m.%d@%H:%M %Z", time.localtime())
+    preamble = "<<<%016.6f:(%d) %s <%s> -  %s:\n" % \
+        (time_stamp, fval, author_name, author_email, local_time)
+    if args.message:
+        msg = args.message[0]
+    else:
+        msg = ""
+    if select.select([sys.stdin,],[],[],0.0)[0]:
+        msg += "\n\n" + sys.stdin.read()
+    msg += "\n%16.6f\n" % (time_stamp,)
+    for commit in args.hashes:
+        cmd = ["git", "notes", "--ref=refs/notes/%s" % (REVIEW_NOTES_REF,),
+            "append", commit, "-m", "%s%s" % (preamble, msg)]
+        try:
+            out = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
+        except subprocess.CalledProcessError as e:
+            sys.stderr.write("could not update notes for commit %s:\n%s\n" % 
+                (commit, e.output.strip(),))
+    print "marked %s" % (" ".join(hashes),)
     return True
+
+def impl_pull(args):
+    remote = args.remote
+    cmd = ["git", "fetch", remote, 
+        "+refs/notes/review/*:refs/remotes/%s/notes/review/*" % (remote,)]
+    sys.stdout.write("fetching notes from %s..." % (remote,))
+    sys.stdout.flush()
+    try:
+        out = subprocess.check_output(cmd)
+    except subprocess.CalledProcessError as e:
+        raise CommandFailedError("could not fetch notes from %s" % (remote,))
+    sys.stdout.write("done.\n")
+    cmd = ["git", "show-ref", "-s", 
+        "refs/remotes/%s/notes/review/remarks" % remote]
+    try:
+        out = subprocess.check_output(cmd)
+    except subprocess.CalledProcessError as e:
+        raise CommandFailedError("remote has no review data")
+    remote_rem_ref = out.strip().strip("\x00")
+
+    cmd = ["git", "show-ref", "-s", "refs/notes/review/remarks"]
+    try:
+        out = subprocess.check_output(cmd)
+    except subprocess.CalledProcessError as e:
+        sys.stderr.write("no local review data\n")
+        out = False
+    if out: 
+        local_rem_ref = out.strip().strip("\x00")
+    else:
+        local_rem_ref = None
+
+    # point git to alternate index file
+    os.environ['GIT_INDEX_FILE'] = 'index.review-merge'
+
+    idx_update = False
+    if remote_rem_ref and (remote_rem_ref != local_rem_ref):
+        if local_rem_ref:
+            differ = diff_tree(local_rem_ref, remote_rem_ref)
+            if not differ:
+                print "nothing to merge (no diff)"
+                return
+            # iterate: write object (concat'd), mktree, update-index, mkcommit, update-ref
+            idx_update = []
+            for d in differ:
+                cmod, bmod, lsha, rsha, ch, fnm = d
+                combd = None
+                if ch == 'M':
+                    combd = combine_notes(cat_file(lsha), cat_file(rsha))
+                elif ch == 'A':
+                    combd = cat_file(rsha)
+                new_obj_sha = hash_object(combd, fnm, write=True)
+                idx_line = "%s %s %s\t%s" % (bmod, 'blob', new_obj_sha, fnm)
+                idx_update.append(idx_line)
+        else:
+            idx_update = ls_tree(remote_rem_ref)
+    else:
+        print "nothing to merge"
+        return
+
+    # ls-tree on local ref and update index
+    if local_rem_ref:
+        update_index(ls_tree(local_rem_ref))
+
+    if idx_update:
+        # update the index w/ diff of local/remote
+        update_index(idx_update)
+
+    # compare index and local (do we need to commit this?)
+    diff = []
+    if local_rem_ref:
+        diff += diff_index(local_rem_ref)
+    if not local_rem_ref or diff:
+        # write the tree
+        new_tree_sha = write_tree()
+        # commit the tree w/ proper parent if relevant
+        new_commit_sha = commit_tree(new_tree_sha, parent=remote_rem_ref)
+        # update the review ref(s)
+        update_ref("refs/notes/%s" % (REVIEW_NOTES_REF,), new_commit_sha)
+        sys.stderr.write("merged.\n")
+    else:
+        sys.stderr.write("nothing new\n")
+
+    # unset the git index file env var
+    del os.environ['GIT_INDEX_FILE']
+    # delete the temp index file
+    os.unlink('index.review-merge')
+
+    return
+
+def impl_push(args):
+    remote = args.remote
+    cmd = ["git", "push", remote, "refs/notes/%s" % (REVIEW_NOTES_REF,)]
+    try:
+        out = subprocess.check_output(cmd)
+    except subprocess.CalledProcessError as e:
+        raise CommandFailedError("could not push review data")
+    return True
+
 
 if __name__ == "__main__":
 
@@ -43,9 +367,51 @@ if __name__ == "__main__":
     cmdparser = parser.add_subparsers(title='git-review commands')
     list_parser = cmdparser.add_parser('list')
     list_parser.set_defaults(func=impl_list)
+    list_parser.add_argument('--all', action='store_true', default=False,
+        help="show all commits with review information")
+    list_parser.add_argument('--pending', action='store_true', default=True,
+        help="show commits with open reviews")
+    list_parser.add_argument('--no-pending', dest='pending', 
+        action='store_false', default=False,
+        help="exclude commits with pending reviews")
+    list_parser.add_argument('--complete', action='store_true', default=False,
+        help="show commits with completed reviews")
+    list_parser.add_argument('--no-complete', dest='complete', 
+        action='store_false', default=False,
+        help="exclude commits with completed reviews")
+    list_parser.add_argument('--ok', action='store_true', default=False,
+        help="show commits with completed, positive reviews")
+    list_parser.add_argument('--rework', action='store_true', default=False,
+        help="show commits with completed, less positive reviews")
+    list_parser.add_argument('--compact', action='store_true', default=False,
+        help="show commit hash and flag value only")
+    list_parser.add_argument('--mine-only', dest="mine_only", 
+        action='store_true', default=False,
+        help="show reviews for your commits only")
 
-    show_parser = cmdparser.add_parser('show')
-    show_parser.set_defaults(func=impl_show)
+    mark_parser = cmdparser.add_parser('mark')
+    mark_parser.add_argument('flag', metavar='FLAG-VALUE', type=int, nargs=1,
+        help="value to which review flags will be set")
+    mark_parser.add_argument('hashes', metavar='COMMIT', type=str, nargs='+',
+        help="commit hash(es) to mark")
+    mark_parser.add_argument('--cautious', dest='force', 
+        action='store_false', default=True,
+        help="don't overwrite any existing flag(s)")
+    mark_parser.add_argument('-m', '--message', type=str, nargs=1,
+        help="message to append to review notes")
+    mark_parser.set_defaults(func=impl_mark)
+
+    pull_parser = cmdparser.add_parser('pull')
+    pull_parser.add_argument('remote', type=str, nargs='?', default='origin')
+    pull_parser.set_defaults(func=impl_pull)
+
+    push_parser = cmdparser.add_parser('push')
+    push_parser.add_argument('remote', type=str, nargs='?', default='origin')
+    push_parser.set_defaults(func=impl_push)
 
     args = parser.parse_args()
-    args.func(args)
+    try:
+        args.func(args)
+    except CommandFailedError as e:
+        print e.message
+        sys.exit(e.returncode)
