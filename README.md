@@ -66,3 +66,5 @@ To push review data to a remote repository (```origin```):
 Or to be more specific (```work```):
 
     git review push work
+
+It is **strongly** advised that you do a ```git review pull``` before doing a ```git review push```.
