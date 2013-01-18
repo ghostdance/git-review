@@ -31,6 +31,14 @@ If you wanted to mark both HEAD and e09ec... as needing review, you'd do this:
 
     git review mark 0 HEAD e09ecbb8cb4c11fba8998b025bdb031c4ae87fe8 -m "can somebody please take a look at this?"
 
+To mark a commit as being in need of work:
+
+    git review mark -1 HEAD -m "Can you remove the debugging statements? Other than that, should be ok."
+
+And when it's a go:
+
+    git review mark +25 HEAD -m "This looks great!"
+
 
 # Listing Review Requests
 
