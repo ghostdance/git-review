@@ -257,7 +257,7 @@ def impl_mark(args):
         except subprocess.CalledProcessError as e:
             sys.stderr.write("could not update notes for commit %s:\n%s\n" % 
                 (commit, e.output.strip(),))
-    print "marked %s" % (" ".join(hashes),)
+    print "marked %s" % (" ".join(args.hashes),)
     return True
 
 def impl_pull(args):
