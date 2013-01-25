@@ -16,7 +16,7 @@ def list_review_flags():
         revflags = subprocess.check_output(["git", "notes", 
             "--ref=refs/notes/%s" % (REVIEW_NOTES_REF,), "list"])
     except subprocess.CalledProcessError as e:
-        raise CommandFailedError("could not get list of review flags: %s" % (e.strerror,))
+        raise CommandFailedError("could not get list of review flags: %s" % (e,))
     if revflags:
         pass
     found = [l.strip().split() for l in revflags.split("\n") if l]
